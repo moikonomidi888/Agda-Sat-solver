@@ -1,97 +1,119 @@
-module solver where
+module verified_solver where
 
-import Relation.Binary.PropositionalEquality as Eq
-open Eq using (_≡_; refl; cong)
-open import Data.Nat using (ℕ; zero; suc)
-open import Data.Nat.Properties using (+-comm; +-identityʳ)
-open import Data.Bool renaming (not to ¬♭_; _∨_ to _∨♭_; _∧_ to _∧♭_)
-open import Data.Vec using (Vec; _∷_; []; [_]; lookup)
-open import Data.Nat
-open import Data.Maybe
-open import Agda.Builtin.Int
-open import Agda.Builtin.Nat
-open import Data.Product
-open import Data.List.Base
-open import Function.Base using (case_of_; case_return_of_)
-open import Data.List.Base
-open import Data.Bool.Base using (not)
-open import Data.Product using (_×_; ∃; ∃-syntax)
-open import Data.Fin
+open import Data.Product using (_×_; proj₁; proj₂; _,_; Σ; Σ-syntax)
+open import Data.Bool using (Bool; true; false; not)
+open import Data.List using (List; []; _∷_; _++_)
+open import Data.Maybe using (Maybe; just; nothing)
+open import Data.Nat using (ℕ; zero; suc; _≟_; _^_)
+open import Data.List.Base using (length)
+open import Relation.Nullary.Decidable using (Dec; yes; no)
+open import Relation.Binary.PropositionalEquality using (_≡_; refl)
+open import Data.Empty using (⊥)
 
+------------------------------------------------------------------------
+-- 1. Syntax and Semantics
+------------------------------------------------------------------------
 
+data Formula : Set where
+  AND : Formula → Formula → Formula
+  OR  : Formula → Formula → Formula
+  NOT : Formula → Formula
+  VAR : ℕ → Formula
 
-infixl 4 _∨_
-infixl 4 _∧_
-infixl 6 ¬_
+data VBool : Set where
+  VR : ℕ → VBool   -- “Undecided”: the variable is not yet assigned.
+  T  : VBool       -- True
+  F  : VBool       -- False
 
-data Formula : (n : ℕ) → Set where
- var_     : {m : ℕ}  → (n : Fin m) → Formula m
- ¬_        : {m : ℕ} → Formula m → Formula m
- _∨_      : {m : ℕ} → Formula m → Formula m → Formula m
- _∧_      : {m : ℕ} → Formula m → Formula m → Formula m
+_+++_ : VBool → VBool → VBool
+VR x +++ VR y = VR x
+T    +++ b   = b
+b    +++ F   = F
+b    +++ T   = b
+F    +++ b   = F
 
-data VBool : (n : ℕ) → Set where
-   VR       : {m : ℕ} → (n : Fin m) -> VBool m
-   VT       : {m : ℕ} →  VBool m
-   VF       : {m : ℕ} →  VBool m
+_//_ : VBool → VBool → VBool
+VR x // VR y = VR x
+T    // b   = T
+b    // T   = T
+F    // b   = b
+b    // F   = b
 
-_+++_         : {m : ℕ} → VBool m → VBool m → VBool m
-(VR m) +++ (VR y)   = VR m
-VT +++ b            =  b
-b +++ VF            =  VF
-b +++ VT            =  b
-VF +++ b            =  VF
+neg : VBool → VBool
+neg (VR x) = VR x
+neg T      = F
+neg F      = T
 
+------------------------------------------------------------------------
+-- 2. Environment and Evaluation
+------------------------------------------------------------------------
 
-_//_         :  {m : ℕ} →  VBool m → VBool m → VBool m
-VR x // VR y  = VR x
-VT // b       = VT
-b // VT       = VT
-VF // b       = b
-b // VF       = b
+-- An environment is a list of assignments (variable, Bool)
+Environment : Set
+Environment = List (ℕ × Bool)
 
-neg        :  {m : ℕ} → VBool m → VBool m
-neg (VR x)  = VR x
-neg VT      =  VF
-neg VF      =  VT
+-- In our solver we keep an extended assignment (a list of pairs paired with a decision flag).
+-- A flag of false indicates that the decision is still “open” (has not been flipped yet).
+-- The function `extr` drops these flags.
+extr : List ((ℕ × Bool) × Bool) → Environment
+extr [] = []
+extr (((x , b) , _) ∷ xs) = (x , b) ∷ extr xs
 
-transformVBool      : {m : ℕ} →  Bool -> VBool m
-transformVBool true = VT
-transformVBool false = VF
+-- A lookup function in an environment.
+lookup : ℕ → Environment → Maybe Bool
+lookup x [] = nothing
+lookup x ((y , b) ∷ ys) with x ≟ y
+... | yes _ = just b
+... | no _  = lookup x ys
 
-searchFor     : {m : ℕ} → Fin m → List (Fin m × Bool) -> VBool m
-searchFor a [] = VR a
-searchFor a (y ∷ ys) = case (toℕ a ≡ᵇ toℕ (proj₁ y)) of λ
-                    {  true  -> (transformVBool(proj₂ y));
-                      false  -> (searchFor a ys)
-                      }
+-- The evaluation function. If a variable is unassigned (lookup fails),
+-- we return the “undecided” value VR x.
+eval : Formula → Environment → VBool
+eval (VAR x) env with lookup x env
+... | nothing    = VR x
+... | just true  = T
+... | just false = F
+eval (AND φ ψ) env = eval φ env +++ eval ψ env
+eval (OR φ ψ)  env = eval φ env // eval ψ env
+eval (NOT φ)   env = neg (eval φ env)
 
-extr               : {m : ℕ} → List ((Fin m × Bool) × Bool) -> List (Fin m × Bool)
-extr  (x ∷ xs) =  ((proj₁ x) ∷ extr xs)
-extr []                    = []
+------------------------------------------------------------------------
+-- 3. Backtracking and the Terminating Solver
+------------------------------------------------------------------------
 
-eval               : {m : ℕ} → Formula m → List (Fin m × Bool) → VBool m
-eval  (var b) y    = searchFor b y
-eval (x ∧ y) j    = eval x j +++ eval y j
-eval (x ∨ y) j    = eval x j // eval y j
-eval (¬ x) y      = neg (eval x y)
+-- Backtracking: search the extended assignment list for the most recent decision
+-- that has not yet been flipped. When found, flip that decision.
+backtr : List ((ℕ × Bool) × Bool) → Maybe (List ((ℕ × Bool) × Bool))
+backtr [] = nothing
+backtr (((x , b) , decision) ∷ xs) with decision
+... | false = just (((x , not b) , true) ∷ xs)
+... | true  = backtr xs
 
-backtr              :{m : ℕ} →  List ((Fin m × Bool) × Bool) → Maybe (List ((Fin m × Bool) × Bool))
-backtr (((n , b) , false) ∷ xs) = (just (((n , (not b)) , true) ∷ xs))
-backtr (((x , b) , true) ∷ xs)  = backtr xs
-backtr  []                      = nothing
+mutual
+  -- Main solver.
+  --   solve : ℕ → (extended assignment) → Formula → Maybe Environment
+  -- The fuel argument (of type ℕ) decreases on every recursive call.
+  solve : ℕ → List ((ℕ × Bool) × Bool) → Formula → Maybe Environment
+  solve zero _ _ = nothing
+  solve (suc fuel) x phi = solve-aux (eval phi (extr x)) fuel x phi
 
-{-# NON_TERMINATING #-}
+  -- Auxiliary function that pattern–matches on the evaluation result.
+  solve-aux : VBool → ℕ → List ((ℕ × Bool) × Bool) → Formula → Maybe Environment
+  solve-aux T      fuel x phi = just (extr x)
+  solve-aux F      fuel x phi with backtr x
+  ... | just y  = solve fuel y phi
+  ... | nothing = nothing
+  solve-aux (VR y) fuel x phi = solve fuel (((y , true) , false) ∷ x) phi
 
-auxSolve  :{m : ℕ} → List ((Fin  m × Bool) × Bool) -> Formula m -> Maybe (List (Fin m × Bool))
-auxSolve x phi = case (eval phi (extr x)) of λ
-                     {(VR n)     ->  auxSolve(((n , true) , false) ∷ x) phi;
-                     VT          ->  just (extr x);
-                     VF          ->  case backtr x of λ
-                       {(just n) -> auxSolve n phi;
-                        nothing  -> nothing
-                        }
-                       }
-                       
-solve :{m : ℕ} →  Formula m → Maybe (List (Fin m × Bool))
-solve z = auxSolve [] z
+------------------------------------------------------------------------
+-- 4. A Fuel Bound Based on the Variables in the Formula
+------------------------------------------------------------------------
+
+vars : Formula → List ℕ
+vars (VAR x)   = x ∷ []
+vars (AND φ ψ) = vars φ ++ vars ψ
+vars (OR φ ψ)  = vars φ ++ vars ψ
+vars (NOT φ)   = vars φ
+
+fuelBound : Formula → ℕ
+fuelBound phi = 2 ^ (length (vars phi))
